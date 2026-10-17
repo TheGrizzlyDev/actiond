@@ -11,6 +11,8 @@ printf '%s\n' \
   "/common/root/etc/nsswitch.conf F 0 0644 0 0 printf 'passwd: files\\ngroup: files\\nhosts: files dns\\n'" \
   > "${pseudo}"
 
+# Follow Bazel's input symlinks when embedding regular files. The lowercase
+# "l" pseudo type would copy those symlinks into the guest image.
 append_runtime() {
   entries="$1"
   libc="$2"
@@ -18,14 +20,14 @@ append_runtime() {
   manifest="$4"
   repo_root="${manifest%/*}"
 
-  printf '/libc/%s/%s/runtime_manifest.json l %s\\n' "${libc}" "${arch}" "${manifest}" >> "${pseudo}"
+  printf '/libc/%s/%s/runtime_manifest.json h %s\\n' "${libc}" "${arch}" "${manifest}" >> "${pseudo}"
   while IFS="$(printf '\\t')" read -r kind rel target; do
     case "${kind}" in
       d)
         printf '/libc/%s/%s/root/%s D 0 0755 0 0\\n' "${libc}" "${arch}" "${rel}" >> "${pseudo}"
         ;;
       f)
-        printf '/libc/%s/%s/root/%s l %s/root/%s\\n' "${libc}" "${arch}" "${rel}" "${repo_root}" "${rel}" >> "${pseudo}"
+        printf '/libc/%s/%s/root/%s h %s/root/%s\\n' "${libc}" "${arch}" "${rel}" "${repo_root}" "${rel}" >> "${pseudo}"
         ;;
       s)
         printf '/libc/%s/%s/root/%s S 0 0777 0 0 %s\\n' "${libc}" "${arch}" "${rel}" "${target}" >> "${pseudo}"
@@ -41,14 +43,14 @@ append_shell_runtime() {
   manifest="$4"
   repo_root="${manifest%/*}"
 
-  printf '/shell/%s/%s/runtime_manifest.json l %s\\n' "${shell}" "${arch}" "${manifest}" >> "${pseudo}"
+  printf '/shell/%s/%s/runtime_manifest.json h %s\\n' "${shell}" "${arch}" "${manifest}" >> "${pseudo}"
   while IFS="$(printf '\\t')" read -r kind rel target; do
     case "${kind}" in
       d)
         printf '/shell/%s/%s/root/%s D 0 0755 0 0\\n' "${shell}" "${arch}" "${rel}" >> "${pseudo}"
         ;;
       f)
-        printf '/shell/%s/%s/root/%s l %s/root/%s\\n' "${shell}" "${arch}" "${rel}" "${repo_root}" "${rel}" >> "${pseudo}"
+        printf '/shell/%s/%s/root/%s h %s/root/%s\\n' "${shell}" "${arch}" "${rel}" "${repo_root}" "${rel}" >> "${pseudo}"
         ;;
       s)
         printf '/shell/%s/%s/root/%s S 0 0777 0 0 %s\\n' "${shell}" "${arch}" "${rel}" "${target}" >> "${pseudo}"

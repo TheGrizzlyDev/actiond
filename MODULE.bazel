@@ -17,6 +17,13 @@ bazel_dep(name = "codesign.bzl", version = "0.0.13")
 bazel_dep(name = "gawk", version = "5.3.2.bcr.3")
 bazel_dep(name = "rules_qemu", version = "0.3.0")
 
+# Version validation only needs to create an empty file; avoid a host touch dependency.
+single_version_override(
+    module_name = "rules_zig",
+    patch_strip = 1,
+    patches = ["//third_party/patches:rules_zig_validation_builtin.patch"],
+)
+
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
@@ -29,6 +36,8 @@ http_archive(
 
 archive_override(
     module_name = "linux.bzl",
+    patch_strip = 1,
+    patches = ["//third_party/patches:linux_nonoverlapping_inputs.patch"],
     integrity = "sha256-2gveHVEG4EE5x3N4kDnUftB7ed/6RRFslFwDquObqRg=",
     strip_prefix = "linux.bzl-e18628f3e177022c2ff0cf93a2e5f2d408f7d2fc",
     urls = ["https://github.com/hermeticbuild/linux.bzl/archive/e18628f3e177022c2ff0cf93a2e5f2d408f7d2fc.tar.gz"],

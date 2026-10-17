@@ -26,6 +26,7 @@ def _shell_deb_runtime_impl(rctx):
     if not bash_static.exists:
         fail("expected static bash payload at root/bin/bash-static")
     rctx.symlink(bash_static, "root/bin/bash")
+    rctx.symlink(bash_static, "root/bin/sh")
     rctx.file(
         "root/usr/bin/env",
         """#!/bin/bash
@@ -47,6 +48,7 @@ esac
         "d\tbin\t",
         "f\tbin/bash-static\t",
         "s\tbin/bash\t/bin/bash-static",
+        "s\tbin/sh\t/bin/bash-static",
         "d\tusr\t",
         "d\tusr/bin\t",
         "f\tusr/bin/env\t",
@@ -75,6 +77,7 @@ filegroup(
     srcs = [
         "root/bin/bash",
         "root/bin/bash-static",
+        "root/bin/sh",
         "root/usr/bin/env",
     ],
     visibility = ["//visibility:public"],

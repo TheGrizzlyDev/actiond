@@ -243,6 +243,17 @@ pub const Store = struct {
         if (stat.kind != .file or stat.size != digest.size_bytes) return error.FailedPrecondition;
     }
 
+    fn needsBlobRepair(self: Store, io: std.Io, digest: Digest) !bool {
+        var path_buffer: [blob_path_len]u8 = undefined;
+        const stat = try self.root.statFile(io, blobSubPath(digest, &path_buffer), .{ .follow_symlinks = false });
+        // Never replace directories or follow symlinks at a CAS blob path.
+        if (stat.kind != .file) return error.FailedPrecondition;
+        if (stat.size == digest.size_bytes) return false;
+        var hash: [64]u8 = undefined;
+        std.log.warn("repairing truncated CAS blob {s}: stored_bytes={d} expected_bytes={d}", .{ digest.formatHex(&hash), stat.size, digest.size_bytes });
+        return true;
+    }
+
     fn requireExistingBlob(self: Store, io: std.Io, digest: Digest) !void {
         self.validateExistingBlob(io, digest) catch |err| switch (err) {
             error.FileNotFound => return error.FailedPrecondition,
@@ -585,8 +596,11 @@ pub const BlobWriter = struct {
                 self.closed = true;
                 self.store.root.renamePreserve(self.tempPath(), self.store.root, final_path, io) catch |err| switch (err) {
                     error.PathAlreadyExists, error.IsDir, error.NotDir => {
-                        try self.store.requireExistingBlob(io, digest);
-                        self.store.root.deleteFile(io, self.tempPath()) catch {};
+                        if (try self.store.needsBlobRepair(io, digest)) {
+                            try self.store.root.rename(self.tempPath(), self.store.root, final_path, io);
+                        } else {
+                            self.store.root.deleteFile(io, self.tempPath()) catch {};
+                        }
                     },
                     else => |e| return e,
                 };
@@ -594,7 +608,24 @@ pub const BlobWriter = struct {
             .anonymous_linux => {
                 if (comptime builtin.os.tag != .linux) unreachable;
                 publishAnonymousLinux(self.file.handle, self.store.root.handle, final_path) catch |err| switch (err) {
-                    error.PathAlreadyExists => try self.store.requireExistingBlob(io, digest),
+                    error.PathAlreadyExists => {
+                        if (try self.store.needsBlobRepair(io, digest)) {
+                            // Give the already verified anonymous inode a temporary
+                            // name, then atomically replace the truncated blob.
+                            while (true) {
+                                const id = next_temp_id.fetchAdd(1, .monotonic);
+                                const temporary = try std.fmt.bufPrint(&self.temp_path_buffer, "{s}{d}", .{ temp_path_prefix, id });
+                                publishAnonymousLinux(self.file.handle, self.store.root.handle, temporary) catch |link_err| switch (link_err) {
+                                    error.PathAlreadyExists => continue,
+                                    else => return link_err,
+                                };
+                                self.temp_path_len = temporary.len;
+                                self.temp_kind = .named;
+                                try self.store.root.rename(temporary, self.store.root, final_path, io);
+                                break;
+                            }
+                        }
+                    },
                     else => |e| return e,
                 };
                 self.file.close(io);
@@ -1075,7 +1106,7 @@ test "Store writes known blobs atomically and ignores existing blob" {
     try std.testing.expectError(error.DigestMismatch, store.putKnownBytes(std.testing.io, digest, "jello"));
 }
 
-test "Store refuses to publish over a truncated existing CAS blob" {
+test "Store refuses unverified repair of a truncated CAS blob" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -1093,8 +1124,8 @@ test "Store refuses to publish over a truncated existing CAS blob" {
     });
 
     try std.testing.expectError(
-        error.FailedPrecondition,
-        store.putKnownBytes(std.testing.io, digest, payload),
+        error.DigestMismatch,
+        store.putKnownBytes(std.testing.io, digest, &([_]u8{'x'} ** payload.len)),
     );
     try std.testing.expectEqual(@as(u64, 3), (try tmp.dir.statFile(std.testing.io, path, .{})).size);
     try std.testing.expect(!try store.has(std.testing.io, digest));
@@ -1380,5 +1411,26 @@ test "Store promotes same-filesystem files into CAS" {
         }
         const staged_stat = try stage.statFile(std.testing.io, "out.txt", .{});
         try std.testing.expectEqual(@as(u64, "promote me".len), staged_stat.size);
+    }
+}
+
+test "BlobWriter repairs truncated CAS files with verified uploads" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store = Store.init(tmp.dir);
+    try store.ensureLayout(std.testing.io);
+    const payload = "verified replacement for a truncated blob";
+    const digest = Digest.fromBytes(payload);
+    var path_buffer: [blob_path_len]u8 = undefined;
+    const path = blobSubPath(digest, &path_buffer);
+    try tmp.dir.createDirPath(std.testing.io, digestParentPath(path));
+    for ([_][]const u8{ "", "truncated" }) |bad_data| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = bad_data });
+        try std.testing.expect(!try store.has(std.testing.io, digest));
+        try store.putKnownBytes(std.testing.io, digest, payload);
+        const repaired = try store.readAlloc(std.testing.io, std.testing.allocator, digest);
+        defer std.testing.allocator.free(repaired);
+        try std.testing.expectEqualStrings(payload, repaired);
+        try tmp.dir.deleteFile(std.testing.io, path);
     }
 }

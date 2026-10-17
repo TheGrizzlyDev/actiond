@@ -25,7 +25,6 @@ Environment:
   ACTIOND_E2E_SOURCE_FILES_PER_DIR=32
   ACTIOND_E2E_NESTED_GROUPS=8
   ACTIOND_E2E_NESTED_FILES_PER_GROUP=96
-  ACTIOND_E2E_JOBS=8
   ACTIOND_REPO_BAZEL_FLAGS="--config=remote"
   ACTIOND_E2E_REMOTE_GRPC_LOG=/path/to/remote_grpc.log
   ACTIOND_E2E_ACTIONDFS_STATS_PATH=/path/to/actiondfs_stats.txt
@@ -137,39 +136,37 @@ run_stress_workspace() {
     remote_grpc_log_flags+=(--remote_grpc_log="${ACTIOND_E2E_REMOTE_GRPC_LOG}")
   fi
 
+  local execution_platform="//:linux_$(uname -m)"
+  if [[ "${execution_platform}" == "//:linux_arm64" ]]; then
+    execution_platform="//:linux_aarch64"
+  fi
   local -a remote_common_flags=(
     --bes_backend=
     --bes_upload_mode=nowait_for_upload_complete
     --remote_executor="grpc://${endpoint}"
     --remote_cache="grpc://${endpoint}"
-    --remote_default_exec_properties=libc=glibc2.35
     --noremote_accept_cached
     --remote_local_fallback=false
     --remote_upload_local_results=false
     --remote_download_outputs=toplevel
     "${remote_grpc_log_flags[@]}"
-    --disk_cache=
-    --jobs="${ACTIOND_E2E_JOBS:-8}"
     --spawn_strategy=remote
     --genrule_strategy=remote
   )
   local -a remote_build_flags=(
     "${remote_common_flags[@]}"
-    --remote_default_exec_properties=limits.memory.bytes=536870912
-    --remote_default_exec_properties=limits.cpu.cores=2
-    --remote_default_exec_properties=limits.pids.max=128
+    --extra_execution_platforms="${execution_platform}"
   )
 
   (
     cd "${test_workspace}"
-    bazel clean --expunge >/dev/null
     bazel build "${ACTIOND_E2E_TARGET:-//:stress_all}" "${remote_build_flags[@]}"
     bazel build //:pids_one_regression "${remote_common_flags[@]}" \
-      --remote_default_exec_properties=limits.pids.max=1
+      --extra_execution_platforms="${execution_platform}_pids_one"
 
     local timeout_started
     timeout_started="$(date +%s)"
-    if bazel build //:timeout_regression "${remote_common_flags[@]}" --remote_retries=0 >"${timeout_log}" 2>&1; then
+    if bazel build //:timeout_regression "${remote_build_flags[@]}" --remote_retries=0 >"${timeout_log}" 2>&1; then
       echo "deadline regression unexpectedly completed its detached sleeping action" >&2
       return 1
     fi

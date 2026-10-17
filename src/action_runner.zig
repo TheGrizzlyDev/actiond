@@ -92,7 +92,30 @@ pub const CgroupLimits = struct {
     }
 };
 
+/// Request-local, bounded startup diagnostics; no shared mutable execution state.
+pub const StartupFailure = struct {
+    buffer: [1024]u8 = undefined,
+    len: usize = 0,
+
+    pub fn message(self: *const StartupFailure) []const u8 {
+        return if (self.len == 0) "action sandbox setup failed" else self.buffer[0..self.len];
+    }
+
+    fn recordStderr(self: *StartupFailure, stderr: []const u8) void {
+        const detail = std.mem.trim(u8, stderr, "\r\n ");
+        if (detail.len == 0) return;
+        self.len = @min(detail.len, self.buffer.len);
+        @memcpy(self.buffer[0..self.len], detail[0..self.len]);
+    }
+
+    fn recordExecFailure(self: *StartupFailure, errno: u32) void {
+        const bytes = std.fmt.bufPrint(&self.buffer, "action sandbox execve failed: errno={d}", .{errno}) catch unreachable;
+        self.len = bytes.len;
+    }
+};
+
 pub const RunOptions = struct {
+    startup_failure: ?*StartupFailure = null,
     chroot_dir: []const u8,
     chroot_cwd: []const u8 = "/",
     bind_mounts: []const BindMount = &.{},
@@ -541,9 +564,19 @@ fn runCommandChroot(
         io,
         setup_pipe.endpoint(0),
         execution_control,
+        options.startup_failure,
     );
     setup_pipe.close(0);
-    if (!setup_signaled) return error.SandboxSetupFailed;
+    if (!setup_signaled) {
+        // Stop the namespace before draining pipes, including failures before execve.
+        terminateActionProcesses(io, allocator, pid, cgroup);
+        const failed = try collectChildResult(io, allocator, stdout_pipe.release(0), stderr_pipe.release(0), pid, cgroup, execution_control, &child_waited);
+        child_waited = true;
+        defer allocator.free(failed.stdout);
+        defer allocator.free(failed.stderr);
+        if (options.startup_failure) |failure| failure.recordStderr(failed.stderr);
+        return error.SandboxSetupFailed;
+    }
     const setup_completed = runnerTimingNow(io);
 
     const child_result = try collectChildResult(
@@ -1001,8 +1034,11 @@ fn childWriteFile(path: [*:0]const u8, bytes: []const u8) void {
 }
 
 fn childSyscallName(rc: usize, comptime name: []const u8) void {
-    if (std.os.linux.errno(rc) == .SUCCESS) return;
-    childWriteLiteral("actiond child setup failed: " ++ name ++ "\n");
+    const errno = std.os.linux.errno(rc);
+    if (errno == .SUCCESS) return;
+    childWriteLiteral("actiond child setup failed: " ++ name ++ " ");
+    childWriteBytes(@tagName(errno));
+    childWriteLiteral("\n");
     std.os.linux.exit(127);
 }
 
@@ -1195,6 +1231,7 @@ fn readSetupSignal(
     io: std.Io,
     fd: std.posix.fd_t,
     execution_control: ExecutionControl,
+    startup_failure: ?*StartupFailure,
 ) !bool {
     var frame: [child_setup_frame_length]u8 = undefined;
     var frame_length: usize = 0;
@@ -1226,7 +1263,10 @@ fn readSetupSignal(
                         if (ready_signaled or value != 0) return false;
                         ready_signaled = true;
                     },
-                    child_setup_exec_failure_tag => return false,
+                    child_setup_exec_failure_tag => {
+                        if (startup_failure) |failure| failure.recordExecFailure(value);
+                        return false;
+                    },
                     else => return false,
                 }
             },
@@ -1660,4 +1700,16 @@ test "runCommandWithOptions rejects chroot execution on non-Linux hosts" {
         .{ .arguments = &.{"/tool"} },
         .{ .chroot_dir = "/" },
     ));
+}
+
+test "startup diagnostics are bounded and retain exec failure when stderr is empty" {
+    var failure: StartupFailure = .{};
+    failure.recordExecFailure(@intFromEnum(std.posix.E.NOENT));
+    failure.recordStderr("");
+    try std.testing.expect(std.mem.indexOf(u8, failure.message(), "execve") != null);
+    failure.recordStderr("actiond child setup failed: execve NOENT\n");
+    try std.testing.expectEqualStrings("actiond child setup failed: execve NOENT", failure.message());
+    const oversized = [_]u8{'x'} ** 2048;
+    failure.recordStderr(&oversized);
+    try std.testing.expectEqual(@as(usize, 1024), failure.message().len);
 }

@@ -80,6 +80,7 @@ pub const RuntimeMountCache = struct {
 };
 
 pub const ExecuteOptions = struct {
+    startup_failure: ?*action_runner.StartupFailure = null,
     runtime_root_path: ?[]const u8 = null,
     cas_blob_root_path: ?[]const u8 = null,
     actiondfs_stage_root_path: ?[]const u8 = null,
@@ -341,6 +342,7 @@ pub fn executeDecodedActionWithOptions(
     const execution_start = executorTimingNow(io);
     try checkExecutionCancellation(options.cancellation);
     var outcome = try action_runner.runCommandWithOptions(io, allocator, store, command, .{
+        .startup_failure = options.startup_failure,
         .chroot_dir = work_root_path,
         .chroot_cwd = chroot_cwd,
         .bind_mounts = bind_mounts.items,

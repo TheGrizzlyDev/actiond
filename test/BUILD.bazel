@@ -29,3 +29,22 @@ sh_test(
     srcs = ["parse_timings_test.sh"],
     data = ["parse_timings.py"],
 )
+
+# Runtime and resource requirements travel with the execution platform.
+[platform(
+    name = "linux_" + cpu,
+    constraint_values = ["@platforms//cpu:" + cpu, "@platforms//os:linux"],
+    exec_properties = {
+        "libc": "glibc2.35",
+        "requires-bash": "",
+        "limits.memory.bytes": "536870912",
+        "limits.cpu.cores": "2",
+        "limits.pids.max": "128",
+    },
+) for cpu in ["aarch64", "x86_64"]]
+
+[platform(
+    name = "linux_" + cpu + "_pids_one",
+    parents = [":linux_" + cpu],
+    exec_properties = {"limits.pids.max": "1"},
+) for cpu in ["aarch64", "x86_64"]]

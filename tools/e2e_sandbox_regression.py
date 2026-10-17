@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify actiond rejects working directories that escape the action chroot."""
+"""Verify sandbox boundaries, startup diagnostics, and recovery after failed startup."""
 
 import hashlib
 import pathlib
@@ -140,8 +140,8 @@ def upload(endpoint, blobs):
             raise RuntimeError("BatchUpdateBlobs rejected a regression blob")
 
 
-def execute(endpoint, action_digest):
-    request = number_field(3, 1) + bytes_field(6, action_digest)
+def execute_response(endpoint, action_digest, skip_cache_lookup=True):
+    request = number_field(3, int(skip_cache_lookup)) + bytes_field(6, action_digest)
     operation = fields(grpc(endpoint, EXECUTE_METHOD, request)[-1])
     if operation.get(3, [0])[-1] != 1:
         raise RuntimeError("Execute returned an incomplete operation")
@@ -156,9 +156,85 @@ def execute(endpoint, action_digest):
     if 2 not in packed:
         raise RuntimeError("Execute returned no encoded response")
 
-    response = fields(packed[2][-1])
+    return fields(packed[2][-1])
+
+
+def execute(endpoint, action_digest):
+    response = execute_response(endpoint, action_digest)
     status = fields(response.get(3, [b""])[-1])
     return status.get(1, [0])[-1], response.get(1, [None])[-1]
+
+
+def startup_regressions(endpoint, executable, executable_digest):
+    script = b"#!/bin/sh\nprintf 'shell-ready\\n'\n"
+    bad_interpreter = b"#!/missing/interpreter\nexit 0\n"
+    script_digest = digest(script)
+    bad_digest = digest(bad_interpreter)
+    directory = b"".join(
+        bytes_field(1, bytes_field(1, name) + bytes_field(2, value) + number_field(4, 1))
+        for name, value in (
+            ("bad-interpreter", bad_digest),
+            ("script", script_digest),
+            ("tool", executable_digest),
+        )
+    )
+    directory_digest = digest(directory)
+    upload(endpoint, [(executable_digest, executable), (script_digest, script),
+                      (bad_digest, bad_interpreter), (directory_digest, directory)])
+    shell_platform = bytes_field(1, bytes_field(1, "requires-bash") + bytes_field(2, ""))
+
+    def action_for(arguments, output_paths=()):
+        command_bytes = command("", arguments, output_paths) + bytes_field(5, shell_platform)
+        command_digest = digest(command_bytes)
+        action = bytes_field(1, command_digest) + bytes_field(2, directory_digest)
+        action_digest = digest(action)
+        upload(endpoint, [(command_digest, command_bytes), (action_digest, action)])
+        return action_digest
+
+    for name, arguments in (
+        ("missing-executable", ("/workspace/missing",)),
+        ("missing-interpreter", ("/workspace/bad-interpreter",)),
+    ):
+        response = execute_response(endpoint, action_for(arguments))
+        status = fields(response.get(3, [b""])[-1])
+        message = status.get(2, [b""])[-1]
+        if status.get(1, [0])[-1] != 13 or b"execve" not in message or b"NOENT" not in message:
+            raise RuntimeError(name + " did not report its startup errno: " + repr(message))
+        if 1 in response:
+            raise RuntimeError(name + " unexpectedly returned an ActionResult")
+
+        # Exercise upload, execution, cache lookup, and download after each failure.
+        marker = ("recovery-" + name).encode()
+        upload(endpoint, [(digest(marker), marker)])
+        path = "recovery/" + name
+        recovery_digest = action_for(("/workspace/tool", "--out-file", path), (path,))
+        recovery = execute_response(endpoint, recovery_digest)
+        result = fields(recovery.get(1, [b""])[-1])
+        if fields(recovery.get(3, [b""])[-1]).get(1, [0])[-1] or result.get(4, [0])[-1]:
+            raise RuntimeError("execution did not recover after " + name)
+        cached = fields(grpc(endpoint, "/build.bazel.remote.execution.v2.ActionCache/GetActionResult",
+                             bytes_field(2, recovery_digest))[-1])
+        outputs = cached.get(2, [])
+        if not outputs:
+            raise RuntimeError("cache lookup did not recover after " + name)
+        output_digest = fields(outputs[0])[2][-1]
+        downloaded = fields(grpc(endpoint, "/build.bazel.remote.execution.v2.ContentAddressableStorage/BatchReadBlobs",
+                                 bytes_field(2, output_digest))[-1])
+        entry = fields(downloaded[1][-1])
+        if fields(entry.get(3, [b""])[-1]).get(1, [0])[-1] or not entry.get(2, [b""])[-1]:
+            raise RuntimeError("download did not recover after " + name)
+        cached_execution = execute_response(endpoint, recovery_digest, skip_cache_lookup=False)
+        if cached_execution.get(2, [0])[-1] != 1:
+            raise RuntimeError("cached execution did not recover after " + name)
+
+    response = execute_response(endpoint, action_for(("/workspace/script",)))
+    result = fields(response.get(1, [b""])[-1])
+    if fields(response.get(3, [b""])[-1]).get(1, [0])[-1] or result.get(4, [0])[-1]:
+        raise RuntimeError("embedded shell runtime did not start a /bin/sh script")
+    expected_stdout = fields(digest(b"shell-ready\n"))
+    if fields(result.get(6, [b""])[-1]) != expected_stdout:
+        raise RuntimeError("embedded /bin/sh script returned unexpected stdout")
+    print("sandbox startup diagnostics and failure recovery regressions passed")
 
 
 def command(working_directory, arguments, output_paths=()):
@@ -229,11 +305,12 @@ def main():
             raise RuntimeError("benign staged working directory did not produce its declared output")
 
     print("sandbox working-directory escape regressions passed")
+    startup_regressions(endpoint, executable, executable_digest)
 
 
 if __name__ == "__main__":
     try:
         main()
     except (OSError, subprocess.SubprocessError, ValueError, RuntimeError) as error:
-        print("sandbox working-directory regression failed: " + str(error), file=sys.stderr)
+        print("sandbox regression failed: " + str(error), file=sys.stderr)
         raise SystemExit(1)

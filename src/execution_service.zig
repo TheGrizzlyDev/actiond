@@ -1,6 +1,7 @@
 const std = @import("std");
 const action_cache = @import("action_cache.zig");
 const action_executor = @import("action_executor.zig");
+const action_runner = @import("action_runner.zig");
 const cas = @import("cas.zig");
 const protobuf = @import("protobuf_wire.zig");
 const reapi = @import("reapi.zig");
@@ -67,14 +68,22 @@ pub fn execute(
     };
     defer work_dir.close(io);
 
-    var outcome = action_executor.executeDecodedActionWithOptions(io, allocator, blob_store, work_dir, action_digest, loaded_action.action, options) catch |err| {
+    var startup_failure: action_runner.StartupFailure = .{};
+    var request_options = options;
+    request_options.startup_failure = &startup_failure;
+    var outcome = action_executor.executeDecodedActionWithOptions(io, allocator, blob_store, work_dir, action_digest, loaded_action.action, request_options) catch |err| {
         std.log.err("execute {s}/{d}: action execution setup failed: {s}", .{
             action_hex,
             action_digest.size_bytes,
             @errorName(err),
         });
         if (executionFailureStatus(err)) |status| {
-            return try completedFailedOperation(allocator, action_digest, status);
+            var detailed_status = status;
+            if (err == error.SandboxSetupFailed) {
+                detailed_status.message = startup_failure.message();
+                std.log.err("execute {s}/{d}: {s}", .{ action_hex, action_digest.size_bytes, detailed_status.message });
+            }
+            return try completedFailedOperation(allocator, action_digest, detailed_status);
         }
         return err;
     };

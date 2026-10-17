@@ -1,0 +1,12 @@
+diff --git a/zig/private/zig_toolchain.bzl b/zig/private/zig_toolchain.bzl
+--- a/zig/private/zig_toolchain.bzl
++++ b/zig/private/zig_toolchain.bzl
+@@ -125,7 +125,7 @@
+             '  echo "Zig SDK version mismatch. Expected \'$2\' but got \'$actual_version\'." >&2',
+             "  exit 1",
+             "fi",
+-            'touch "$3"',
++            ': > "$3"',
+         ]),
+         mnemonic = "ZigVersionValidation",
+         progress_message = "validate Zig SDK version for toolchain %{label}",

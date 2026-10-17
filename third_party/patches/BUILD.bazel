@@ -1,4 +1,6 @@
 exports_files([
+    "linux_nonoverlapping_inputs.patch",
+    "rules_zig_validation_builtin.patch",
     "llvm_musl_root_package_copy.patch",
     "zstd_no_pthread.patch",
 ])

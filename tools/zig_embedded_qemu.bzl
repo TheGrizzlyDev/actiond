@@ -2,6 +2,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 load("//tools:zstd.bzl", "zstd_compress", "zstd_tool_attr")
 
 _QEMU_TOOLCHAIN_TYPE = "@rules_qemu//qemu:target_toolchain_type"
+_COREUTILS_TOOLCHAIN_TYPE = "@bazel_lib//lib:coreutils_toolchain_type"
 
 def _zig_embedded_qemu_source_impl(ctx):
     qemu = ctx.toolchains[_QEMU_TOOLCHAIN_TYPE]
@@ -18,17 +19,13 @@ def _zig_embedded_qemu_source_impl(ctx):
 
     if qemu.system_target == "x86_64-softmmu":
         firmware_raw = ctx.actions.declare_file(ctx.label.name + ".qboot.rom")
-        ctx.actions.run_shell(
-            arguments = [
-                qemu.system_data_anchor.path,
-                firmware_raw.path,
-            ],
-            command = """
-set -eu
-cp "$1/qboot.rom" "$2"
-""",
+        ctx.actions.run(
+            executable = ctx.toolchains[_COREUTILS_TOOLCHAIN_TYPE].coreutils_info.bin,
+            arguments = ["cp", qemu.system_data_anchor.path + "/qboot.rom", firmware_raw.path],
             inputs = qemu.system_data_files,
             outputs = [firmware_raw],
+            mnemonic = "CopyQemuFirmware",
+            toolchain = _COREUTILS_TOOLCHAIN_TYPE,
         )
         firmware = ctx.actions.declare_file(ctx.label.name + ".qboot.rom.zst")
         zstd_compress(ctx, firmware_raw, firmware)
@@ -48,7 +45,7 @@ cp "$1/qboot.rom" "$2"
 _zig_embedded_qemu_source = rule(
     implementation = _zig_embedded_qemu_source_impl,
     attrs = {"_zstd": zstd_tool_attr()},
-    toolchains = [_QEMU_TOOLCHAIN_TYPE],
+    toolchains = [_QEMU_TOOLCHAIN_TYPE, _COREUTILS_TOOLCHAIN_TYPE],
 )
 
 def zig_embedded_qemu(name, target_compatible_with = [], visibility = None):

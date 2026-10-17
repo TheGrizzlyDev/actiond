@@ -1,0 +1,81 @@
+--- a/internal/linux_objects.bzl
++++ b/internal/linux_objects.bzl
+@@ -84,6 +84,8 @@
+     doc = "Shared Linux source tree inputs consumed by generated object targets.",
+     fields = {
+         "files": "Depset of Linux source tree files.",
++        "inputs": "Nonoverlapping source inputs, computed once for all objects.",
++        "input_paths": "Paths covered by the shared action inputs.",
+         "root": "Root marker file for the Linux source tree, usually Kconfig.",
+     },
+ )
+@@ -99,7 +101,10 @@
+ )
+ 
+ def _linux_source_tree_impl(ctx):
++    inputs = _nonoverlapping_inputs(ctx.files.srcs)
+     return [LinuxSourceTreeInfo(
++        inputs = inputs,
++        input_paths = {file.path: True for file in inputs},
+         files = depset(ctx.files.srcs),
+         root = ctx.file.root,
+     )]
+@@ -733,13 +738,34 @@
+         files.extend(ctx.files.source_tree)
+     return files
+ 
++def _uncovered_inputs(files, paths):
++    result = []
++    for file in files:
++        parts = file.path.split("/")
++        if not any(["/".join(parts[:i]) in paths for i in range(1, len(parts) + 1)]):
++            result.append(file)
++    return result
++
++def _nonoverlapping_inputs(files):
++    # Keep lookup files in the provider, but omit children of directory inputs
++    # from action sandboxes. Normalize the large shared source set only once.
++    paths = {file.path: True for file in files}
++    result = []
++    for file in files:
++        parts = file.path.split("/")
++        if not any(["/".join(parts[:i]) in paths for i in range(1, len(parts))]):
++            result.append(file)
++    return result
++
+ def _linux_source_tree_inputs(ctx, direct = []):
+     root = _linux_source_root_file(ctx)
+     inputs = list(direct)
+     if root:
+         inputs.append(root)
+-    inputs.extend(_linux_source_tree_files(ctx))
+-    return inputs
++    info = _linux_source_tree_info(ctx)
++    if info:
++        return _uncovered_inputs(inputs, info.input_paths) + info.inputs
++    return _nonoverlapping_inputs(inputs + _linux_source_tree_files(ctx))
+ 
+ def _rewrite_utsversion_tmp_flags(flags, object, utsversion_tmp):
+     object_dir = _linux_object_directory(object)
+@@ -2780,7 +2806,7 @@
+         inputs.append(ctx.file.source_root)
+     ctx.actions.run(
+         executable = ctx.executable._kconfig_parse,
+-        inputs = depset(inputs),
++        inputs = depset(_nonoverlapping_inputs(inputs)),
+         outputs = [config, auto_conf, auto_conf_cmd, autoconf_h, rustc_cfg, kernel_release],
+         arguments = [args],
+         mnemonic = "LinuxResolvedConfig",
+@@ -3169,10 +3195,8 @@
+ 
+     direct_inputs = _linux_source_tree_inputs(
+         ctx,
+-        direct = [src] + generated_files + generated_object_headers + generated_sources + generated_inputs.files + config_flag_inputs.inputs,
+-    )
+-    if src != ctx.file.src:
+-        direct_inputs.append(ctx.file.src)
++        direct = [src, ctx.file.src] + generated_files + generated_object_headers + generated_sources + generated_inputs.files + config_flag_inputs.inputs,
++    )
+     transitive_inputs = [cc_toolchain.all_files]
+     if config:
+         transitive_inputs.append(config.files)
